@@ -65,15 +65,30 @@ class DanmakuClient:
         self.msg_queue: asyncio.Queue = asyncio.Queue(maxsize=2000)
         self._queue_task: Optional[asyncio.Task] = None
         
+        # ===== 新增：连接状态跟踪 =====
+        self._fatal_error: Optional[str] = None  # 致命错误信息（如认证失败）
+        self._max_reconnect_per_server = 3  # 每个服务器最大重连次数
+        self._server_status: Dict[int, Dict] = {}  # 各服务器连接状态
+        
     async def init_room(self) -> bool:
-        """初始化直播间信息"""
+        """初始化直播间信息
+        返回: True=初始化成功, False=初始化失败（房间不存在或其他错误）
+        """
         # 获取真实房间 ID
         room_info = await bili_client.get_room_info(self.room_id)
         if not room_info:
-            logger.error(f"获取房间信息失败：{self.room_id}")
+            logger.error(f"房间 {self.room_id} 不存在或无法访问")
             return False
         
+        # 检查房间状态
+        room_status = room_info.get("live_status", -1)
+        if room_status == 0:
+            logger.warning(f"房间 {self.room_id} 未开播，但尝试连接弹幕服务器")
+        
         self.real_room_id = room_info.get("room_id")
+        if not self.real_room_id:
+            logger.error(f"获取房间真实ID失败：{self.room_id}")
+            return False
         
         # 获取当前用户信息（用于 uid）
         user_info = await bili_client.get_user_info()
@@ -91,6 +106,9 @@ class DanmakuClient:
             return False
         
         self.token = danmu_info.get("token")
+        if not self.token:
+            logger.error(f"获取弹幕token失败：{self.room_id}")
+            return False
         
         # 获取 host_list（多个服务器）
         self.host_list = danmu_info.get("host_list", [])
@@ -308,28 +326,25 @@ class DanmakuClient:
             
         except asyncio.TimeoutError:
             return True  # 超时也继续，可能认证是静默的
+        except websockets.exceptions.ConnectionClosed:
+            return False  # 连接已关闭，认证失败
     
     async def _send_heartbeat(self, ws: WebSocketClientProtocol):
-        """发送心跳包 - 30 秒间隔 + 响应处理"""
+        """发送心跳包 - 30 秒间隔
+        注意：不在这里接收响应，响应由 _listen 统一处理
+        避免多个协程同时调用 ws.recv() 导致并发错误
+        """
         while self.running:
             try:
                 # 发送心跳
                 packet = self._pack_data(b'[object Object]', self.PACKET_TYPE_HEARTBEAT)
                 await ws.send(packet)
-                logger.debug("心跳已发送")
+                logger.debug(f"[房间{self.room_id}] 心跳已发送")
                 
-                # 等待心跳响应（在线人数）
-                try:
-                    data = await asyncio.wait_for(ws.recv(), timeout=5.0)
-                    messages = self._unpack_data(data)
-                    # 心跳响应会在 _unpack_data 中处理
-                except asyncio.TimeoutError:
-                    logger.warning("心跳响应超时")
-                
-                # 等待 30 秒
+                # 等待 30 秒（不接收响应，让 _listen 处理）
                 await asyncio.sleep(self.HEARTBEAT_INTERVAL)
             except Exception as e:
-                logger.debug(f"心跳发送失败：{e}")
+                logger.debug(f"[房间{self.room_id}] 心跳发送失败：{e}")
                 break
     
     async def _listen(self, ws: WebSocketClientProtocol):
@@ -353,7 +368,7 @@ class DanmakuClient:
                             # 非阻塞放入队列
                             self.msg_queue.put_nowait(msg)
                         except asyncio.QueueFull:
-                            logger.warning("消息队列已满，丢弃消息")
+                            logger.warning(f"[房间{self.room_id}] 消息队列已满，丢弃消息")
                     
                 except websockets.exceptions.ConnectionClosed:
                     logger.debug(f"WebSocket 连接已关闭")
@@ -366,17 +381,22 @@ class DanmakuClient:
     
     async def _process_queue(self):
         """独立的消息处理协程 - 从队列中取消息并处理"""
+        logger.info(f"[房间{self.room_id}] 消息处理协程已启动")
+        processed_count = 0
         while self.running:
             try:
                 # 从队列中取消息
                 msg = await asyncio.wait_for(self.msg_queue.get(), timeout=1.0)
+                processed_count += 1
+                
                 await self._handle_message(msg)
                 self.msg_queue.task_done()
             except asyncio.TimeoutError:
                 # 队列为空，继续等待
-                pass
+                continue
             except Exception as e:
-                logger.error(f"处理队列消息异常：{e}")
+                logger.error(f"[房间{self.room_id}] 处理队列消息异常：{e}")
+        logger.info(f"[房间{self.room_id}] 消息处理协程已停止，共处理 {processed_count} 条消息")
     
     async def _handle_message(self, msg: Dict[str, Any]):
         """处理消息"""
@@ -427,6 +447,30 @@ class DanmakuClient:
             if self.on_danmaku_callback:
                 await self.on_danmaku_callback(gift_data)
         
+        # 醒目留言（Super Chat）
+        elif cmd in ("SUPER_CHAT_MESSAGE", "SUPER_CHAT_MESSAGE_JPN"):
+            data = msg.get("data", {})
+            sc_data = {
+                "type": "super_chat",
+                "user": {
+                    "uid": data.get("uid"),
+                    "name": data.get("user_info", {}).get("uname"),
+                    "face": data.get("user_info", {}).get("face"),
+                },
+                "message": data.get("message", ""),
+                "price": data.get("price", 0),  # 价格（元）
+                "time": data.get("time", 0),  # 持续时间（秒）
+                "start_time": data.get("start_time"),  # 开始时间戳
+                "end_time": data.get("end_time"),  # 结束时间戳
+                "background_color": data.get("background_color"),  # 背景颜色
+                "font_color": data.get("font_color"),  # 字体颜色
+                "id": data.get("id"),  # SC ID
+                "room_id": self.room_id,
+            }
+            logger.info(f"[房间{self.room_id}] 收到醒目留言: {sc_data['user']['name']} ￥{sc_data['price']}: {sc_data['message'][:30]}...")
+            if self.on_danmaku_callback:
+                await self.on_danmaku_callback(sc_data)
+        
         # 进入直播间
         elif cmd == "INTERACT_WORD":
             data = msg.get("data", {})
@@ -444,11 +488,15 @@ class DanmakuClient:
         # 其他消息类型可以根据需要添加
     
     async def start(self) -> bool:
-        """启动客户端 - 同时连接多个服务器"""
+        """启动客户端 - 同时连接多个服务器
+        返回: True=启动成功, False=启动失败（包括致命错误）
+        """
         if not await self.init_room():
             return False
         
         self.running = True
+        self._fatal_error = None  # 重置致命错误
+        self._server_status = {}  # 重置服务器状态
         self._tasks = []
         
         # ===== 新增：启动消息处理协程 =====
@@ -456,29 +504,73 @@ class DanmakuClient:
         self._tasks.append(self._queue_task)
         
         # 同时连接所有服务器（最多 3 个）
-        for i, host in enumerate(self.host_list[:3]):
+        server_count = min(3, len(self.host_list))
+        for i, host in enumerate(self.host_list[:server_count]):
             ws_url = f"wss://{host['host']}:{host['wss_port']}/sub"
             task = asyncio.create_task(self._connect_server(ws_url, i))
             self._tasks.append(task)
         
-        # 等待一会儿看连接情况
-        await asyncio.sleep(2)
+        # 等待连接结果，最多等待 8 秒
+        max_wait_time = 8
+        check_interval = 0.5
+        waited_time = 0
         
+        while waited_time < max_wait_time:
+            await asyncio.sleep(check_interval)
+            waited_time += check_interval
+            
+            # 检查是否有致命错误（如认证失败）
+            if self._fatal_error:
+                logger.error(f"启动失败：{self._fatal_error}")
+                await self.stop()
+                return False
+            
+            # 检查当前连接数
+            connected = len([ws for ws in self.ws_list if ws])
+            if connected > 0:
+                # 至少有一个连接成功
+                logger.info(f"弹幕客户端启动成功：room={self.room_id}, 连接数={connected}/{server_count}")
+                return True
+            
+            # 检查是否所有服务器都已失败（非致命错误导致的重连耗尽）
+            failed_servers = sum(1 for s in self._server_status.values() if s.get("status") == "failed")
+            if failed_servers >= server_count:
+                logger.error(f"所有弹幕服务器连接失败 ({failed_servers}/{server_count})")
+                await self.stop()
+                return False
+        
+        # 超时，检查最终状态
         connected = len([ws for ws in self.ws_list if ws])
         if connected == 0:
-            logger.error("所有弹幕服务器连接失败")
+            logger.error(f"启动超时，未能建立任何连接")
+            await self.stop()
             return False
         
-        logger.info(f"弹幕客户端启动成功：room={self.room_id}, 连接数={connected}/{len(self.host_list[:3])}")
+        logger.info(f"弹幕客户端启动成功：room={self.room_id}, 连接数={connected}/{server_count}")
         return True
     
     async def _connect_server(self, ws_url: str, index: int):
-        """连接单个服务器 - 带指数退避重连"""
+        """连接单个服务器 - 带指数退避重连，但有最大重连次数限制"""
         reconnect_delay = 1  # 初始重连延迟（秒）
-        max_delay = 60  # 最大重连延迟（秒）
+        max_delay = 30  # 最大重连延迟（秒）- 减少以更快失败
         reconnect_attempts = 0
+        ws = None
+        
+        self._server_status[index] = {"status": "connecting", "error": None}
         
         while self.running:
+            # 检查是否已达到最大重连次数
+            if reconnect_attempts >= self._max_reconnect_per_server:
+                logger.error(f"[连接{index+1}] 达到最大重连次数({self._max_reconnect_per_server})，停止重连")
+                self._server_status[index] = {"status": "failed", "error": "max_retries_exceeded"}
+                break
+            
+            # 检查是否有致命错误（认证失败等）
+            if self._fatal_error:
+                logger.error(f"[连接{index+1}] 检测到致命错误，停止重连: {self._fatal_error}")
+                self._server_status[index] = {"status": "failed", "error": f"fatal: {self._fatal_error}"}
+                break
+            
             try:
                 logger.info(f"[连接{index+1}] 正在连接：{ws_url}")
                 ws = await websockets.connect(
@@ -491,10 +583,27 @@ class DanmakuClient:
                 logger.info(f"[连接{index+1}] WebSocket 已连接")
                 
                 # 发送认证
-                await self._send_auth(ws)
-                logger.info(f"[连接{index+1}] 认证成功")
+                auth_success = await self._send_auth(ws)
+                if not auth_success:
+                    # 认证失败是致命错误，不应该重连
+                    error_msg = f"[连接{index+1}] 认证失败，房间可能不存在或需要密码"
+                    logger.error(error_msg)
+                    self._fatal_error = "认证失败，请检查房间号是否正确"
+                    self._server_status[index] = {"status": "failed", "error": "auth_failed"}
+                    
+                    # 清理资源
+                    if ws in self.ws_list:
+                        self.ws_list.remove(ws)
+                    try:
+                        await ws.close()
+                    except:
+                        pass
+                    break  # 退出重连循环，不再尝试
                 
-                # 重置重连计数
+                logger.info(f"[连接{index+1}] 认证成功")
+                self._server_status[index] = {"status": "connected", "error": None}
+                
+                # 重置重连计数（成功连接后重置）
                 reconnect_attempts = 0
                 reconnect_delay = 1
                 
@@ -511,21 +620,53 @@ class DanmakuClient:
                 if ws in self.ws_list:
                     self.ws_list.remove(ws)
                 logger.warning(f"[连接{index+1}] 连接断开")
+                self._server_status[index] = {"status": "disconnected", "error": None}
+                
+            except websockets.exceptions.ConnectionClosed as e:
+                # 连接正常关闭或异常关闭，记录日志后重连
+                reconnect_attempts += 1
+                if ws and ws in self.ws_list:
+                    self.ws_list.remove(ws)
+                if e.code == 1000 or e.code == 1001:
+                    logger.info(f"[连接{index+1}] 连接正常关闭 (code={e.code})")
+                else:
+                    logger.warning(f"[连接{index+1}] 连接异常关闭 (code={e.code}, reason={e.reason})")
                 
             except Exception as e:
                 reconnect_attempts += 1
-                logger.error(f"[连接{index+1}] 连接失败：{e}")
+                if ws and ws in self.ws_list:
+                    self.ws_list.remove(ws)
                 
-                if not self.running:
-                    break
+                # 根据错误类型记录不同级别的日志
+                error_msg = str(e)
+                if "no close frame" in error_msg:
+                    logger.warning(f"[连接{index+1}] 连接意外断开")
+                elif "Connection reset" in error_msg or "Connection aborted" in error_msg:
+                    logger.warning(f"[连接{index+1}] 连接被重置")
+                else:
+                    logger.error(f"[连接{index+1}] 连接异常：{e}")
                 
-                # 指数退避重连
-                delay = min(reconnect_delay * (1.5 ** (reconnect_attempts - 1)), max_delay)
-                logger.info(f"[连接{index+1}] {delay:.1f}秒后重试 ({reconnect_attempts}次)...")
-                await asyncio.sleep(delay)
+                # 尝试优雅关闭
+                if ws:
+                    try:
+                        await ws.close()
+                    except:
+                        pass
+                
+            if not self.running:
+                break
+            
+            # 指数退避重连
+            delay = min(reconnect_delay * (1.5 ** (reconnect_attempts - 1)), max_delay)
+            logger.info(f"[连接{index+1}] {delay:.1f}秒后重试 ({reconnect_attempts}/{self._max_reconnect_per_server})...")
+            await asyncio.sleep(delay)
+        
+        # 连接彻底失败，记录最终状态
+        if self._server_status.get(index, {}).get("status") not in ["connected"]:
+            logger.error(f"[连接{index+1}] 连接彻底失败，不再重连")
     
     async def stop(self):
-        """停止客户端 - 关闭所有连接"""
+        """停止客户端 - 关闭所有连接并清理状态"""
         logger.info(f"正在停止弹幕客户端：room={self.room_id}")
         self.running = False
         
@@ -544,8 +685,11 @@ class DanmakuClient:
             except:
                 pass
         
+        # 清理所有状态
         self.ws_list.clear()
         self._tasks.clear()
+        self._server_status.clear()
+        self._fatal_error = None
         
         # 清空队列
         while not self.msg_queue.empty():

@@ -4,12 +4,14 @@
 
 ## 功能特性
 
-- 🔴 **实时弹幕监控** - WebSocket连接，低延迟接收弹幕
-- 🛡️ **敏感词过滤** - 支持自定义敏感词库（.md文件）
+- 🔴 **实时弹幕监控** - WebSocket连接，多服务器冗余，低延迟接收弹幕
+- 💎 **醒目留言** - Super Chat 实时显示，带颜色标识
+- 🛡️ **敏感词过滤** - 支持自定义敏感词库（.md文件），自动禁言
 - 🔨 **用户管理** - 禁言/解禁用户，查看禁言列表
 - 👥 **舰队标识** - 总督/提督/舰长特殊背景标识
 - 📊 **数据统计** - 在线用户、弹幕数量实时统计
 - 🎨 **界面定制** - 三档字体大小调整
+- 🔄 **智能重连** - 指数退避重连，连接更稳定
 
 ## 快速开始
 
@@ -17,7 +19,7 @@
 
 适用于 Windows 用户，无需安装 Python。
 
-1. **下载** `B站房管工具-v1.0.0.zip` 并解压
+1. **下载** `B站房管工具-v1.1.0.zip` 并解压
 2. **配置 Cookie**
    - 复制 `.env.example` 为 `.env`
    - 填写 `SESSDATA` 和 `BILI_JCT`（获取方式见下方）
@@ -131,22 +133,26 @@ python run.py
 bilibili-mod-tool/
 ├── app/
 │   ├── api/              # API路由
+│   │   └── routes.py
 │   ├── core/             # 核心模块
 │   │   ├── bili_client.py      # B站API客户端
-│   │   ├── danmaku_ws.py       # WebSocket弹幕连接
+│   │   ├── danmaku_ws.py       # WebSocket弹幕连接（多连接版）
 │   │   ├── room_manager.py     # 房间管理
-│   │   ├── config.py           # 配置
+│   │   ├── config.py           # 配置管理
 │   │   └── wbi.py              # WBI签名
 │   ├── services/         # 服务模块
-│   │   └── moderation.py       # 审核服务
+│   │   └── moderation.py       # 弹幕审核服务
 │   ├── static/           # 静态文件
 │   │   ├── index.html          # 前端页面
 │   │   └── guard_bg/           # 舰队背景图
 │   └── main.py           # 应用入口
+├── frontend/             # 前端源码（开发用）
+│   └── index.html
 ├── sensitive_words/      # 敏感词文件目录
 ├── .env                  # 环境变量配置
 ├── requirements.txt      # 依赖列表
-└── run.py               # 启动脚本
+├── run.py               # 启动脚本
+└── package_exe.py       # EXE打包脚本
 ```
 
 ## 打包 EXE（开发者）
@@ -161,7 +167,7 @@ pip install pyinstaller
 python package_exe.py
 ```
 
-输出文件：`dist/B站房管工具-v1.0.0.zip`
+输出文件：`dist/B站房管工具-v1.1.0.zip`
 
 ## 注意事项
 
@@ -185,6 +191,32 @@ MIT License
 哔哩哔哩：江边砍柴 https://space.bilibili.com/18185980
 
 GitHub：
+
+## 更新日志
+
+### v1.1.0 (2026-03-16)
+
+**新增功能**
+- ✨ 醒目留言（Super Chat）支持 - 实时显示SC消息，带颜色标识
+- ✨ 多服务器连接 - 同时连接3个弹幕服务器，减少弹幕遗漏
+- ✨ 消息队列缓冲 - 生产者-消费者模式处理高并发弹幕
+- ✨ 智能重连机制 - 指数退避重连，避免无限重连
+
+**优化**
+- 🚀 修复 WebSocket 并发接收错误（`ConcurrencyError`）
+- 🚀 优化房间启动失败处理 - 认证失败不再无限重试
+- 🚀 改进弹幕去重机制 - 基于 dm_v2 ID 去重
+- 🚀 优化心跳机制 - 30秒间隔，稳定保持连接
+
+### v1.0.0 (2026-03-15)
+
+**初始版本**
+- ✨ 实时弹幕监控
+- ✨ 敏感词过滤与自动禁言
+- ✨ 用户禁言/解禁管理
+- ✨ 舰队标识（总督/提督/舰长）
+- ✨ 三档字体大小调整
+- ✨ 敏感词库文件支持
 
 ## 免责声明
 

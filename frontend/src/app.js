@@ -296,10 +296,51 @@ createApp({
         console.log('Gift:', data);
       }
       
+      // 醒目留言（Super Chat）
+      if (data.type === 'super_chat') {
+        addSuperChat(data, true);
+      }
+      
       // 进入房间
       if (data.type === 'enter') {
         addUser(data.user);
       }
+    }
+    
+    // 添加醒目留言
+    function addSuperChat(data, isNew) {
+      const sc = {
+        ...data,
+        id: Date.now() + Math.random(),
+        isNew,
+        isSuperChat: true  // 标记为醒目留言
+      };
+      
+      danmakuList.value.push(sc);
+      
+      // 限制数量
+      if (danmakuList.value.length > 500) {
+        danmakuList.value = danmakuList.value.slice(-300);
+      }
+      
+      // 添加用户
+      if (data.user) {
+        addUser(data.user);
+      }
+      
+      // 滚动到底部
+      nextTick(() => {
+        if (danmakuListRef.value) {
+          danmakuListRef.value.scrollTop = danmakuListRef.value.scrollHeight;
+        }
+        
+        // 移除 new 标记
+        if (isNew) {
+          setTimeout(() => {
+            sc.isNew = false;
+          }, 1000);
+        }
+      });
     }
     
     // 添加弹幕
