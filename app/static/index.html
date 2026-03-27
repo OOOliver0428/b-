@@ -595,6 +595,22 @@
           <div class="panel">
             <div class="panel-header">敏感词过滤</div>
             <div class="panel-body">
+              <!-- 词库文件选择 -->
+              <div style="margin-bottom: 12px;">
+                <label style="display: block; font-size: 12px; color: #666; margin-bottom: 4px;">切换词库</label>
+                <div style="display: flex; gap: 8px;">
+                  <select v-model="selectedWordFile" class="input-box" style="flex: 1;">
+                    <option v-for="f in wordFiles" :key="f" :value="f">{{ f }}</option>
+                  </select>
+                  <button class="btn btn-default" style="padding: 4px 10px; font-size: 12px;" @click="loadWordFile(false)">替换</button>
+                  <button class="btn btn-primary" style="padding: 4px 10px; font-size: 12px;" @click="loadWordFile(true)">合并</button>
+                </div>
+                <div style="font-size: 11px; color: #999; margin-top: 4px;">
+                  已加载: {{ loadedFiles.join(', ') || '无' }} ({{ sensitiveWords.length }} 词)
+                </div>
+              </div>
+              
+              <!-- 敏感词列表 -->
               <div class="word-tags">
                 <span v-for="word in sensitiveWords" :key="word" class="word-tag">
                   {{ word }}
@@ -695,6 +711,10 @@
         const sensitiveWords = ref([]);
         const newWord = ref('');
         const autoCheck = ref(true);
+        // 敏感词文件管理
+        const wordFiles = ref([]);
+        const selectedWordFile = ref('');
+        const loadedFiles = ref([]);
 
         // 弹窗
         const banModal = ref({
@@ -865,7 +885,7 @@
           if (data.type === 'danmaku') {
             addDanmaku(data, true);
 
-            // 自动审核
+            // 自动审核弹幕
             if (autoCheck.value) {
               checkAutoModeration(data);
             }
@@ -874,6 +894,11 @@
           // 醒目留言（Super Chat）
           if (data.type === 'super_chat') {
             addDanmaku(data, true);
+
+            // 自动审核 SC
+            if (autoCheck.value) {
+              checkAutoModeration(data);
+            }
           }
 
           if (data.type === 'enter') {
@@ -934,13 +959,14 @@
         }
 
         function checkAutoModeration(danmaku) {
-          const content = danmaku.content || '';
+          const content = danmaku.content || danmaku.message || '';
           const userId = danmaku.user?.uid;
-          if (!userId) return;
+          if (!userId || !content) return;
 
           for (const word of sensitiveWords.value) {
             if (content.includes(word)) {
-              banUserDirect(userId, 1, `触发敏感词: ${word}`);
+              // 自动禁言使用静默模式（不弹 alert）
+              banUserDirect(userId, 1, `触发敏感词: ${word}`, true);
               return;
             }
           }
@@ -962,13 +988,14 @@
           await banUserDirect(
             banModal.value.user.uid,
             banModal.value.hour,
-            banModal.value.reason
+            banModal.value.reason,
+            false  // 手动禁言，保留提示
           );
           banModal.value.show = false;
           loadBanList();
         }
 
-        async function banUserDirect(userId, hour, reason) {
+        async function banUserDirect(userId, hour, reason, silent = false) {
           if (!currentRoomId.value) return;
           try {
             const response = await fetch(`${API_BASE}/api/moderation/ban`, {
@@ -982,12 +1009,24 @@
               })
             });
             if (response.ok) {
-              alert('禁言成功');
+              if (!silent) {
+                alert('禁言成功');
+              } else {
+                console.log(`[自动禁言] 用户 ${userId} 已被禁言: ${reason}`);
+              }
             } else {
-              alert('禁言失败');
+              if (!silent) {
+                alert('禁言失败');
+              } else {
+                console.error(`[自动禁言] 禁言用户 ${userId} 失败`);
+              }
             }
           } catch (e) {
-            alert('禁言请求失败');
+            if (!silent) {
+              alert('禁言请求失败');
+            } else {
+              console.error('[自动禁言] 请求异常:', e);
+            }
           }
         }
 
@@ -1053,29 +1092,95 @@
             const data = await response.json();
             if (data.code === 0 && data.data) {
               sensitiveWords.value = data.data;
+              loadedFiles.value = data.loaded_files || [];
             }
           } catch (e) {
             console.error('加载敏感词失败:', e);
           }
         }
 
-        function addWord() {
+        // 加载可用的敏感词文件列表
+        async function loadWordFilesList() {
+          try {
+            const response = await fetch(`${API_BASE}/api/moderation/sensitive-word-files`);
+            const data = await response.json();
+            if (data.code === 0) {
+              wordFiles.value = data.data || [];
+              if (wordFiles.value.length > 0 && !selectedWordFile.value) {
+                selectedWordFile.value = wordFiles.value[0];
+              }
+            }
+          } catch (e) {
+            console.error('加载词库文件列表失败:', e);
+          }
+        }
+
+        // 加载/合并词库文件
+        async function loadWordFile(merge) {
+          if (!selectedWordFile.value) return;
+          const endpoint = merge ? 'load-merge' : 'load';
+          try {
+            const response = await fetch(`${API_BASE}/api/moderation/sensitive-words/${endpoint}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ filename: selectedWordFile.value })
+            });
+            const data = await response.json();
+            if (data.code === 0) {
+              sensitiveWords.value = data.data || [];
+              await loadSensitiveWords();  // 刷新 loaded_files
+              console.log(data.message);
+            } else {
+              alert('加载失败: ' + data.message);
+            }
+          } catch (e) {
+            console.error('加载词库失败:', e);
+            alert('加载失败');
+          }
+        }
+
+        async function addWord() {
           const word = newWord.value.trim();
           if (!word) return;
           if (sensitiveWords.value.includes(word)) {
             alert('该敏感词已存在');
             return;
           }
-          sensitiveWords.value.push(word);
-          newWord.value = '';
-          // 注意：当前后端敏感词通过 .env 配置，前端添加仅在内存中生效
-          // 刷新页面后会丢失。如需持久化请通过 sensitive_words/*.md 文件配置
+          try {
+            const response = await fetch(`${API_BASE}/api/moderation/sensitive-words/add`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ word, filename: 'default.md' })
+            });
+            const data = await response.json();
+            if (data.code === 0) {
+              sensitiveWords.value = data.data || [];
+              newWord.value = '';
+            } else {
+              alert(data.message || '添加失败');
+            }
+          } catch (e) {
+            console.error('添加敏感词失败:', e);
+            alert('请求失败');
+          }
         }
 
-        function removeWord(word) {
-          const idx = sensitiveWords.value.indexOf(word);
-          if (idx > -1) {
-            sensitiveWords.value.splice(idx, 1);
+        async function removeWord(word) {
+          try {
+            const response = await fetch(`${API_BASE}/api/moderation/sensitive-words/remove`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ word, filename: 'default.md' })
+            });
+            const data = await response.json();
+            if (data.code === 0) {
+              sensitiveWords.value = data.data || [];
+            } else {
+              alert(data.message || '移除失败');
+            }
+          } catch (e) {
+            console.error('移除敏感词失败:', e);
+            alert('请求失败');
           }
         }
 
@@ -1090,8 +1195,9 @@
         // 定期刷新禁言列表
         let interval = null;
         onMounted(() => {
-          // 加载后端敏感词
+          // 加载后端敏感词和词库文件列表
           loadSensitiveWords();
+          loadWordFilesList();
           // 定期刷新禁言列表
           interval = setInterval(() => {
             if (isConnected.value) loadBanList();
@@ -1119,6 +1225,9 @@
           autoCheck,
           banModal,
           currentRoomId,
+          wordFiles,
+          selectedWordFile,
+          loadedFiles,
           toggleConnection,
           banUser,
           confirmBan,
@@ -1128,6 +1237,7 @@
           clearDanmaku,
           addWord,
           removeWord,
+          loadWordFile,
           formatTime
         };
       }

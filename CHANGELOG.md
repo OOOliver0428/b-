@@ -7,12 +7,22 @@
 - **multi_danmaku_ws.py**: 标记为废弃模块，添加弃用警告，委托给 DanmakuClient
 - **敏感词同步**: 前端敏感词初始化改为从后端 API 加载，解决前后端敏感词不同步问题
 - **.gitignore**: 移除对 `sensitive_words/` 的忽略，确保默认敏感词库可提交到仓库
+- **后端 moderation 接入**: `Room.on_message()` 中接入 `moderation_service.check()`，弹幕和 SC 都会走自动审核
+- **敏感词持久化**: 前端增删敏感词调用后端 API，后端写入 .md 文件，刷新不丢失
 
 ### Bug Fixes (Medium)
 - **delete_danmaku**: 实现删除弹幕 API 端点，明确 B站不支持单条删除的限制
 - **WebSocket 重连**: 前端添加指数退避自动重连机制（最多 5 次重连）
 - **get_ban_list**: 修复 `ps` 参数误用为页码的问题，新增 `pn` 参数用于页码
 - **双重审核**: 前端自动审核改用后端敏感词列表，减少前后端逻辑不一致
+- **SC 自动审核**: 前端 `checkAutoModeration` 现在覆盖 danmaku 和 super_chat 两种类型
+- **自动禁言静默**: `banUserDirect` 区分手动/自动禁言，自动禁言使用 console.log 代替 alert
+
+### New Features
+- **敏感词分类**: 前端增加词库文件选择器（替换/合并），后端新增 `load-merge` API
+- **触发统计**: 新增 `GET /api/moderation/stats` 接口，记录敏感词触发次数
+- **自动加载词库**: 后端启动时自动加载 `sensitive_words/default.md`
+- **敏感词增删 API**: 新增 `POST /api/moderation/sensitive-words/add` 和 `/remove` 接口
 
 ### Improvements
 - **CORS**: 限制为 localhost 来源，提升安全性

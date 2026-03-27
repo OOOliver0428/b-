@@ -170,7 +170,7 @@ async def get_sensitive_word_files():
 
 @router.post("/moderation/sensitive-words/load")
 async def load_sensitive_words(data: dict):
-    """加载指定文件的敏感词"""
+    """加载指定文件的敏感词（替换当前列表）"""
     filename = data.get("filename", "")
     if not filename:
         return {"code": -1, "message": "文件名不能为空"}
@@ -179,21 +179,81 @@ async def load_sensitive_words(data: dict):
     if not filename.endswith(".md"):
         return {"code": -1, "message": "只能加载 .md 文件"}
     
-    words = load_sensitive_words_from_file(filename)
+    count = moderation_service.load_file(filename)
+    if count == 0 and not os.path.exists(os.path.join(SENSITIVE_WORDS_DIR, filename)):
+        return {"code": -1, "message": f"文件 {filename} 不存在"}
     
-    # 加载到 moderation_service
-    moderation_service.sensitive_words = words
+    return {"code": 0, "message": f"已加载 {count} 个敏感词", "data": moderation_service.sensitive_words}
+
+
+@router.post("/moderation/sensitive-words/load-merge")
+async def load_sensitive_words_merge(data: dict):
+    """加载指定文件的敏感词（合并到当前列表）"""
+    filename = data.get("filename", "")
+    if not filename:
+        return {"code": -1, "message": "文件名不能为空"}
+    if not filename.endswith(".md"):
+        return {"code": -1, "message": "只能加载 .md 文件"}
     
-    logger.info(f"已加载敏感词文件 {filename}: {len(words)} 个词")
-    return {"code": 0, "message": f"已加载 {len(words)} 个敏感词", "data": words}
+    added = moderation_service.load_file_merge(filename)
+    return {
+        "code": 0,
+        "message": f"合并加载完成，新增 {added} 个词",
+        "data": moderation_service.sensitive_words
+    }
+
 
 @router.get("/moderation/sensitive-words")
 async def get_sensitive_words():
     """获取当前加载的敏感词列表"""
     return {
         "code": 0, 
-        "data": moderation_service.sensitive_words
+        "data": moderation_service.sensitive_words,
+        "loaded_files": moderation_service.loaded_files,
     }
+
+
+@router.post("/moderation/sensitive-words/add")
+async def add_sensitive_word(data: dict):
+    """添加敏感词并持久化到文件"""
+    word = data.get("word", "").strip()
+    filename = data.get("filename", "default.md").strip()
+    if not word:
+        return {"code": -1, "message": "敏感词不能为空"}
+    if not filename.endswith(".md"):
+        return {"code": -1, "message": "只能写入 .md 文件"}
+    
+    if word in moderation_service.sensitive_words:
+        return {"code": -1, "message": "该敏感词已存在"}
+    
+    success = moderation_service.add_sensitive_word(word, filename)
+    if success:
+        return {"code": 0, "message": "添加成功", "data": moderation_service.sensitive_words}
+    else:
+        return {"code": -1, "message": "添加失败，文件写入异常"}
+
+
+@router.post("/moderation/sensitive-words/remove")
+async def remove_sensitive_word(data: dict):
+    """移除敏感词并持久化到文件"""
+    word = data.get("word", "").strip()
+    filename = data.get("filename", "default.md").strip()
+    if not word:
+        return {"code": -1, "message": "敏感词不能为空"}
+    if not filename.endswith(".md"):
+        return {"code": -1, "message": "只能写入 .md 文件"}
+    
+    success = moderation_service.remove_sensitive_word(word, filename)
+    if success:
+        return {"code": 0, "message": "移除成功", "data": moderation_service.sensitive_words}
+    else:
+        return {"code": -1, "message": "该敏感词不存在"}
+
+
+@router.get("/moderation/stats")
+async def get_moderation_stats():
+    """获取审核触发统计"""
+    return {"code": 0, "data": moderation_service.get_stats()}
 
 
 # ============ WebSocket接口（实时弹幕） ============

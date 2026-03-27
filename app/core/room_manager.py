@@ -7,6 +7,7 @@ from loguru import logger
 
 from app.core.danmaku_ws import DanmakuClient
 from app.core.bili_client import bili_client
+from app.services.moderation import moderation_service, ActionType
 
 
 @dataclass
@@ -57,6 +58,27 @@ class Room:
         # 全局去重（多连接时避免重复）
         if self._is_duplicate(msg):
             return
+        
+        # ===== 自动审核：对弹幕和 SC 进行审核 =====
+        msg_type = msg.get("type", "")
+        if msg_type in ("danmaku", "super_chat"):
+            result = await moderation_service.check(msg)
+            if result.action == ActionType.BAN:
+                user = msg.get("user", {})
+                uid = user.get("uid")
+                if uid:
+                    try:
+                        await bili_client.ban_user(
+                            self.room_id, uid, result.duration, result.reason
+                        )
+                        logger.info(f"[自动审核] 已禁言用户 {user.get('name')} ({uid}): {result.reason}")
+                    except Exception as e:
+                        logger.error(f"[自动审核] 禁言失败: {e}")
+                # 审核拦截：不广播被禁言的消息
+                return
+            elif result.action == ActionType.BLOCK:
+                logger.info(f"[自动审核] 屏蔽弹幕: {result.reason}")
+                return
         
         # 保存历史记录（限制数量）
         self.danmaku_history.append(msg)
