@@ -1,7 +1,7 @@
 """API路由"""
-import asyncio
 import os
 import sys
+import asyncio
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
@@ -36,6 +36,12 @@ class UnbanUserRequest(BaseModel):
 
 class SensitiveWordRequest(BaseModel):
     word: str
+
+
+class DeleteDanmakuRequest(BaseModel):
+    room_id: int
+    msg_id: str = ""
+    user_id: int
 
 
 class AutoModerationConfig(BaseModel):
@@ -111,6 +117,17 @@ async def get_ban_list(room_id: int):
     """获取禁言列表"""
     ban_list = await room_manager.get_ban_list(room_id)
     return {"code": 0, "data": ban_list}
+
+
+@router.post("/moderation/delete-danmaku")
+async def delete_danmaku(data: DeleteDanmakuRequest):
+    """删除弹幕（B站不支持单条删除，此接口会禁言用户）"""
+    success = await bili_client.delete_danmaku(data.room_id, data.msg_id, data.user_id)
+    if success:
+        return {"code": 0, "message": "操作成功"}
+    else:
+        # B站不支持单条删除弹幕，提示用户使用禁言功能
+        return {"code": -1, "message": "B站直播不支持删除单条弹幕，请使用禁言功能阻止用户发言"}
 
 
 # ============ 敏感词管理接口 ============
@@ -197,7 +214,6 @@ async def danmaku_websocket(websocket: WebSocket, room_id: int):
         return
     
     # 创建消息队列
-    import asyncio
     message_queue = asyncio.Queue()
     
     # 定义回调函数 - 将消息放入队列

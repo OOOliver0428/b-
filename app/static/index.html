@@ -683,11 +683,16 @@
         const ws = ref(null);
         const danmakuListRef = ref(null);
 
+        // 重连状态
+        const reconnectAttempts = ref(0);
+        const maxReconnectAttempts = 5;
+        let reconnectTimer = null;
+
         // 数据
         const danmakuList = ref([]);
         const userList = ref([]);
         const banList = ref([]);
-        const sensitiveWords = ref(['广告', '垃圾', '傻逼']);
+        const sensitiveWords = ref([]);
         const newWord = ref('');
         const autoCheck = ref(true);
 
@@ -722,6 +727,64 @@
           }
         }
 
+        function connectWebSocket(rid) {
+          // 清理旧连接
+          if (ws.value) {
+            ws.value.onclose = null; // 防止触发重连循环
+            ws.value.close();
+          }
+
+          const wsUrl = `${API_BASE.replace('http', 'ws')}/api/ws/danmaku/${rid}`;
+          ws.value = new WebSocket(wsUrl);
+
+          ws.value.onopen = () => {
+            isConnected.value = true;
+            isConnecting.value = false;
+            reconnectAttempts.value = 0;
+            console.log('WebSocket connected');
+            loadBanList();
+          };
+
+          ws.value.onmessage = (event) => {
+            try {
+              const data = JSON.parse(event.data);
+              if (data.type === 'super_chat') {
+                console.log('收到SC:', data);
+              }
+              handleMessage(data);
+            } catch (e) {
+              console.error('Parse error:', e);
+            }
+          };
+
+          ws.value.onclose = (event) => {
+            isConnected.value = false;
+            isConnecting.value = false;
+            console.log('WebSocket closed', event.code, event.reason);
+
+            // 非主动关闭且房间仍有效，尝试自动重连
+            if (event.code !== 1000 && currentRoomId.value && reconnectAttempts.value < maxReconnectAttempts) {
+              const delay = Math.min(1000 * Math.pow(2, reconnectAttempts.value), 30000);
+              reconnectAttempts.value++;
+              console.log(`将在 ${delay/1000}s 后重连 (${reconnectAttempts.value}/${maxReconnectAttempts})`);
+              reconnectTimer = setTimeout(() => {
+                if (currentRoomId.value && !isConnected.value) {
+                  console.log('正在自动重连...');
+                  connectWebSocket(currentRoomId.value);
+                }
+              }, delay);
+            } else if (reconnectAttempts.value >= maxReconnectAttempts) {
+              console.log('达到最大重连次数，停止重连');
+              currentRoomId.value = null;
+            }
+          };
+
+          ws.value.onerror = (err) => {
+            console.error('WebSocket error:', err);
+            isConnecting.value = false;
+          };
+        }
+
         async function startListening() {
           if (!roomId.value) {
             alert('请输入房间号');
@@ -735,6 +798,7 @@
           }
 
           isConnecting.value = true;
+          reconnectAttempts.value = 0;
 
           try {
             // 1. 启动房间
@@ -752,40 +816,7 @@
             currentRoomId.value = rid;
 
             // 2. 连接 WebSocket
-            const wsUrl = `${API_BASE.replace('http', 'ws')}/api/ws/danmaku/${rid}`;
-            ws.value = new WebSocket(wsUrl);
-
-            ws.value.onopen = () => {
-              isConnected.value = true;
-              isConnecting.value = false;
-              console.log('WebSocket connected');
-              loadBanList();
-            };
-
-            ws.value.onmessage = (event) => {
-              try {
-                const data = JSON.parse(event.data);
-                // 调试日志：显示所有消息类型
-                if (data.type === 'super_chat') {
-                  console.log('收到SC:', data);
-                }
-                handleMessage(data);
-              } catch (e) {
-                console.error('Parse error:', e);
-              }
-            };
-
-            ws.value.onclose = () => {
-              isConnected.value = false;
-              isConnecting.value = false;
-              console.log('WebSocket closed');
-            };
-
-            ws.value.onerror = (err) => {
-              console.error('WebSocket error:', err);
-              isConnecting.value = false;
-              alert('连接失败');
-            };
+            connectWebSocket(rid);
 
           } catch (error) {
             isConnecting.value = false;
@@ -794,6 +825,13 @@
         }
 
         async function stopListening() {
+          // 取消重连定时器
+          if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+          }
+          reconnectAttempts.value = 0;
+
           if (ws.value) {
             ws.value.close();
             ws.value = null;
@@ -888,6 +926,10 @@
           if (!user || !user.uid) return;
           if (!userList.value.find(u => u.uid === user.uid)) {
             userList.value.push(user);
+            // 限制用户列表大小，防止内存泄漏
+            if (userList.value.length > 500) {
+              userList.value = userList.value.slice(-300);
+            }
           }
         }
 
@@ -982,12 +1024,39 @@
           }
         }
 
-        function deleteDanmaku(item) {
-          alert('删除弹幕功能开发中');
+        async function deleteDanmaku(item) {
+          if (!currentRoomId.value || !item.user?.uid) return;
+          try {
+            const response = await fetch(`${API_BASE}/api/moderation/delete-danmaku`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                room_id: currentRoomId.value,
+                msg_id: item.msg_id || '',
+                user_id: item.user.uid
+              })
+            });
+            const data = await response.json();
+            alert(data.message || '操作完成');
+          } catch (e) {
+            alert('请求失败');
+          }
         }
 
         function clearDanmaku() {
           danmakuList.value = [];
+        }
+
+        async function loadSensitiveWords() {
+          try {
+            const response = await fetch(`${API_BASE}/api/moderation/sensitive-words`);
+            const data = await response.json();
+            if (data.code === 0 && data.data) {
+              sensitiveWords.value = data.data;
+            }
+          } catch (e) {
+            console.error('加载敏感词失败:', e);
+          }
         }
 
         function addWord() {
@@ -999,6 +1068,8 @@
           }
           sensitiveWords.value.push(word);
           newWord.value = '';
+          // 注意：当前后端敏感词通过 .env 配置，前端添加仅在内存中生效
+          // 刷新页面后会丢失。如需持久化请通过 sensitive_words/*.md 文件配置
         }
 
         function removeWord(word) {
@@ -1019,6 +1090,9 @@
         // 定期刷新禁言列表
         let interval = null;
         onMounted(() => {
+          // 加载后端敏感词
+          loadSensitiveWords();
+          // 定期刷新禁言列表
           interval = setInterval(() => {
             if (isConnected.value) loadBanList();
           }, 5000);
@@ -1026,6 +1100,7 @@
 
         onUnmounted(() => {
           if (interval) clearInterval(interval);
+          if (reconnectTimer) clearTimeout(reconnectTimer);
           if (ws.value) ws.value.close();
         });
 

@@ -167,16 +167,17 @@ class BilibiliClient:
             logger.error(f"解除禁言异常: {e}")
         return False
     
-    async def get_ban_list(self, room_id: int, page: int = 1) -> List[Dict[str, Any]]:
+    async def get_ban_list(self, room_id: int, page: int = 1, page_size: int = 20) -> List[Dict[str, Any]]:
         """获取禁言列表
         参考: https://socialsisteryi.github.io/bilibili-API-collect/docs/live/silent_user_manage.html
         """
         url = f"{self.BASE_URL}/xlive/web-ucenter/v1/banned/GetSilentUserList"
-        
-        # 使用 POST 请求，添加必要参数
+
+        # ps = page size（每页数量），pn = page number（页码）
         data = {
             "room_id": str(room_id),
-            "ps": str(page),  # 注意参数名是 ps 不是 page
+            "pn": str(page),
+            "ps": str(page_size),
             "csrf": settings.BILI_JCT,
             "csrf_token": settings.BILI_JCT,
             "visit_id": "",
@@ -204,19 +205,23 @@ class BilibiliClient:
         return []
     
     async def delete_danmaku(
-        self, 
-        room_id: int, 
-        msg_id: str, 
+        self,
+        room_id: int,
+        msg_id: str,
         user_id: int
     ) -> bool:
         """
         删除弹幕（撤回）
-        注意：B站直播弹幕删除接口经常变动，这里使用通用方法
+
+        注意：B站直播弹幕不支持单条删除。房管只能禁言用户来阻止后续弹幕。
+        此方法记录操作日志并返回 False。
         """
-        # 最新接口可能有所不同，这里预留
-        logger.info(f"删除弹幕: room={room_id}, msg={msg_id}, user={user_id}")
-        # TODO: 根据实际接口实现
-        return True
+        logger.warning(
+            f"B站直播弹幕不支持单条删除。"
+            f"如需阻止用户发言，请使用禁言功能。"
+            f"room={room_id}, msg={msg_id}, user={user_id}"
+        )
+        return False
 
 
 # 全局客户端实例

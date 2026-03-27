@@ -5,6 +5,7 @@ import time
 import sys
 import signal
 import asyncio
+import threading
 import uvicorn
 from app.core.config import settings
 # 直接导入 FastAPI 应用对象，确保 PyInstaller 能正确打包
@@ -84,7 +85,6 @@ async def main():
     await server.serve()
 
 if __name__ == "__main__":
-    import threading
     try:
         asyncio.run(main())
     except KeyboardInterrupt:

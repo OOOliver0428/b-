@@ -11,6 +11,7 @@ from loguru import logger
 from app.api.routes import router
 from app.core.room_manager import room_manager
 from app.core.bili_client import bili_client
+from app.core.config import settings
 
 
 @asynccontextmanager
@@ -22,7 +23,6 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 50)
     
     # 检查Cookie配置
-    from app.core.config import settings
     if not settings.SESSDATA or not settings.BILI_JCT:
         logger.warning("警告: 未配置SESSDATA或BILI_JCT，房管功能将不可用")
         logger.warning("请在.env文件中配置你的B站Cookie")
@@ -43,14 +43,19 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="B站房管工具 API",
         description="B站直播弹幕监控和房管管理工具",
-        version="1.0.0",
+        version="1.2.0",
         lifespan=lifespan
     )
     
-    # CORS配置
+    # CORS配置 - 限制为本地访问
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # 生产环境应该限制具体域名
+        allow_origins=[
+            "http://127.0.0.1:8000",
+            "http://localhost:8000",
+            f"http://127.0.0.1:{settings.PORT}",
+            f"http://localhost:{settings.PORT}",
+        ],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -80,8 +85,7 @@ app = create_app()
 
 if __name__ == "__main__":
     import uvicorn
-    from app.core.config import settings
-    
+
     uvicorn.run(
         "app.main:app",
         host=settings.HOST,

@@ -1,6 +1,7 @@
 # Python
 venv/
 __pycache__/
+**/__pycache__/
 *.py[cod]
 *$py.class
 *.so
@@ -40,8 +41,8 @@ wheels/
 *.log
 logs/
 
-# 敏感词库（可选，如果想公开可以删除这行）
-sensitive_words/
+# 敏感词库 - 用户自定义文件（默认词库保留在仓库中）
+# sensitive_words/custom*.md
 
 # 打包输出
 out/
